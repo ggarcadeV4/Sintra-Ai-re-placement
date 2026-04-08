@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import db
 from config import load_config
+from providers import PROVIDERS, get_api_key
 
 # ── Default system prompt for the GUI ──────────────────────────────────────
 DEFAULT_SYSTEM_PROMPT = """You are Arcade OS, a helpful AI assistant running locally on the user's machine.
@@ -127,21 +128,31 @@ async def health():
 
 @app.get("/api/models")
 async def list_models():
-    """Return all available Ollama models for the model switcher."""
-    models = await _get_ollama_models()
-    # Also include any Gemini models if API key is set
+    """Return all available models across every configured provider."""
     cfg = load_config()
-    extras = []
-    if cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY"):
-        extras.append({"id": "gemini/gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "gemini"})
-        extras.append({"id": "gemini/gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "gemini"})
+    all_models = []
 
-    # Format Ollama models
-    ollama_list = []
-    for m in models:
-        ollama_list.append({"id": f"ollama/{m}", "name": m, "provider": "ollama"})
+    # ── Ollama: live-query for actually-running models ──────────────────
+    ollama_live = await _get_ollama_models()
+    for m in ollama_live:
+        all_models.append({"id": f"ollama/{m}", "name": m, "provider": "ollama"})
 
-    return {"models": ollama_list + extras}
+    # ── Cloud / local providers: surface if API key is present ─────────
+    _SKIP = {"ollama", "lmstudio", "custom"}  # handled separately
+    for prov_name, prov_cfg in PROVIDERS.items():
+        if prov_name in _SKIP:
+            continue
+        key = get_api_key(prov_name, cfg)
+        if not key:
+            continue  # No key \u2192 don't show these models
+        for model_name in prov_cfg.get("models", []):
+            all_models.append({
+                "id":       f"{prov_name}/{model_name}",
+                "name":     model_name,
+                "provider": prov_name,
+            })
+
+    return {"models": all_models}
 
 
 # ── Conversations REST ────────────────────────────────────────────────────
@@ -219,7 +230,7 @@ async def _resolve_model(configured_model: str) -> str:
                 print(f"[Model] Resolved {configured_model} \u2192 {resolved}")
             return resolved
 
-    # Configured model not found — try preference list
+    # Configured model not found \u2014 try preference list
     for pref in _MODEL_PREFERENCES:
         for m in available:
             if m.startswith(pref):
@@ -258,7 +269,7 @@ async def ws_chat(websocket: WebSocket):
         await websocket.close()
         return
 
-    # Each connection gets its own state — thread safety per the build plan
+    # Each connection gets its own state \u2014 thread safety per the build plan
     agent_state = AgentState()
     cfg = load_config()
     _history_loaded = False  # Flag: only hydrate from DB once per WS connection
@@ -346,7 +357,7 @@ async def ws_chat(websocket: WebSocket):
                         asyncio.run_coroutine_threadsafe(
                             event_queue.put(event), loop
                         ).result(timeout=10)  # Block until queued
-                    print(f"[Agent] Generation complete — {event_count} events")
+                    print(f"[Agent] Generation complete \u2014 {event_count} events")
                 except Exception as e:
                     tb = traceback.format_exc()
                     print(f"[Agent] ERROR in generation:\n{tb}")
@@ -369,7 +380,7 @@ async def ws_chat(websocket: WebSocket):
                     try:
                         event = await asyncio.wait_for(event_queue.get(), timeout=120)
                     except asyncio.TimeoutError:
-                        print("[WS] Agent timeout — no events for 120s")
+                        print("[WS] Agent timeout \u2014 no events for 120s")
                         await websocket.send_json({
                             "type": "error",
                             "data": "Response timed out. Is your AI model running? Check that Ollama is started."
